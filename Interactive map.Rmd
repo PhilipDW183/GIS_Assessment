@@ -1,0 +1,345 @@
+---
+title: "interactive map"
+author: "Philip Wilkinson"
+date: "07/01/2020"
+output: html_document
+---
+
+This map combines all indicators from figure 1 and 2 into a single interactive leaflet map. 
+
+```{r}
+
+library(sf)
+library(tmap)
+library(leafpop)
+library(leaflet)
+library(tmaptools)
+library(tidyverse)
+library(plyr)
+library(classInt)
+library(RColorBrewer)
+library(geojsonio)
+library(knitr)
+library(leafpop)
+library(leaflet)
+
+#importing the NUTS3 geojson
+NUTS3 <- geojson_read("https://opendata.arcgis.com/datasets/473aefdcee19418da7e5dbfdeacf7b90_2.geojson", what = "sp")
+
+#switching the geojson to NUTS
+NUTS3_SF <- st_as_sf(NUTS3)
+
+#reading in the data that was created as a result
+NUTS3_data <- read.csv("Data/NUTS3(1).csv", na=c("n/a", "na"))
+
+#merging the sf object with the data created to be able to analyse this later
+UKNUTS3Map <- merge(NUTS3_SF,
+                    NUTS3_data,
+                    by.x = "nuts318cd",
+                    by.y = "NUTS.code",
+                    no.dups=TRUE)
+
+#setting the breaks for the GVA data
+breaksGVA <- c(0,55,70,85,100,115,130,145,1500)
+
+#finding the mean and standard deviation for the relevant columns to be able to set the breaks
+UEM <- mean(UKNUTS3Map$U.E.rate...Jul.2018.Jun.2019, na.rm=TRUE)
+UESD <- sd(UKNUTS3Map$U.E.rate...Jul.2018.Jun.2019, na.rm=TRUE)
+UEMin <- min(UKNUTS3Map$U.E.rate...Jul.2018.Jun.2019, na.rm=TRUE)
+UEMax <- max(UKNUTS3Map$U.E.rate...Jul.2018.Jun.201, na.rm=TRUE)
+
+#the breaks were then set using the standard deviations and means
+breaksUE <- c(UEMin, UEM-2*UESD, UEM-1.25*UESD, UEM-0.5*UESD, UEM, UEM+0.5*UESD, UEM+1.25*UESD, UEM+2*UESD, UEMax)
+
+#This was then repeated for the other measures e.g. IMD
+IMDM <- mean(UKNUTS3Map$IMD.2019...Average.score, na.rm=TRUE)
+IMDSD <- sd(UKNUTS3Map$IMD.2019...Average.score, na.rm=TRUE)
+IMDMax <- max(UKNUTS3Map$IMD.2019...Average.score, na.rm=TRUE)
+IMDMin <- min(UKNUTS3Map$IMD.2019...Average.score, na.rm=TRUE)
+
+breaksIMD <- c(IMDMin, IMDM-1.5*IMDSD, IMDM-0.75*IMDSD, IMDM, IMDM+0.75*IMDSD, IMDM+1.5*IMDSD, IMDMax)
+
+
+#male life expectancy
+LEMM <- mean(UKNUTS3Map$LE.males.2015.2017,na.rm=TRUE)
+LEMSD <- sd(UKNUTS3Map$LE.males.2015.2017, na.rm=TRUE)
+LEMMin <- min(UKNUTS3Map$LE.males.2015.2017, na.rm=TRUE)
+LEMMax <- max(UKNUTS3Map$LE.males.2015.2017, na.rm=TRUE)
+
+breaksLEM <- c(LEMMin, LEMM-1.5*LEMSD, LEMM-0.75*LEMSD, LEMM, LEMM+0.75*LEMSD, LEMM+1.5*LEMSD, LEMMax)
+
+
+
+#female life expectancy
+LEFM <- mean(UKNUTS3Map$LE.females.2015.2017, na.rm = TRUE)
+LEFSD <- sd(UKNUTS3Map$LE.females.2015.2017, na.rm = TRUE)
+LEFMin <- min(UKNUTS3Map$LE.females.2015.2017, na.rm=TRUE)
+LEFMax <- max(UKNUTS3Map$LE.females.2015.2017, na.rm=TRUE)
+
+breaksLEFM <- c(LEFMin, LEFM-1.5*LEFSD, LEFM-0.75*LEFSD, LEFM, LEFM+0.75*LEFSD, LEFM+1.5*LEFSD, LEFMax)
+
+#GCSE scores
+GCSEM <- mean(UKNUTS3Map$GCSE.2018.A..C.., na.rm=TRUE)
+GCSESD <- sd(UKNUTS3Map$GCSE.2018.A..C.., na.rm=TRUE)
+GCSEMin <- min(UKNUTS3Map$GCSE.2018.A..C.., na.rm=TRUE)
+GCSEMax <- max(UKNUTS3Map$GCSE.2018.A..C.., na.rm=TRUE)
+
+breaksGCSE <- c(GCSEMin, GCSEM-2*GCSESD, GCSEM-GCSESD, GCSEM, GCSEM+GCSESD, GCSEM+2*GCSESD, GCSEMax)
+
+
+#percentage voting leave
+LeaveM <- mean(UKNUTS3Map$Leave, na.rm=TRUE)
+LeaveSD <- sd(UKNUTS3Map$Leave, na.rm=TRUE)
+LeaveMin <- min(UKNUTS3Map$Leave, na.rm=TRUE)
+LeaveMax <- max(UKNUTS3Map$Leave, na.rm=TRUE)
+
+breaksLeave <- c(LeaveMin, LeaveM-1.5*LeaveSD, LeaveM-0.75*LeaveSD, LeaveM, LeaveM+0.75*LeaveSD, LeaveM+1.5*LeaveSD, LeaveMax)
+
+RdBu7 <- get_brewer_pal("RdBu", n=7)
+RdBu5 <- get_brewer_pal("RdBu", n=5)
+RdBu8 <- get_brewer_pal("RdBu", n=8)
+ReverseRdBu <- get_brewer_pal("-RdBu", n =6)
+ReversedRdBU <- get_brewer_pal("-RdBu", n=8)
+
+#given that leaflet uses world map data then the map must be ttrasnsformed to WGS84 projection
+UKNUTS3MapWGS <- st_transform(UKNUTS3Map, 4326)
+
+#the data can be used to create popup tables for each of the indicators
+popGVA <- popupTable(#the data comes from the map
+                     UKNUTS3MapWGS,
+                     #the columns to be included are the NUTS3 code, the NUTS3 name and the valye
+                     zcol=c("nuts318cd", "nuts318nm", "GVA.in..2017"))
+#unemployment popup
+popUE <- popupTable(UKNUTS3MapWGS, zcol=c("nuts318cd", "nuts318nm", "U.E.rate...Jul.2018.Jun.2019"))
+#male life expectancy popup
+popMLE <- popupTable(UKNUTS3MapWGS, zcol=c("nuts318cd", "nuts318nm", "LE.males.2015.2017"))
+#female life expectancy popup
+popFLE <- popupTable(UKNUTS3MapWGS, zcol=c("nuts318cd", "nuts318nm", "LE.females.2015.2017"))
+#GCSE popup
+popGCSE <- popupTable(UKNUTS3MapWGS, zcol=c("nuts318cd", "nuts318nm", "GCSE.2018.A..C.."))
+#IMD popup
+popIMD <- popupTable(UKNUTS3MapWGS, zcol=c("nuts318cd", "nuts318nm", "IMD.2019...Average.score"))
+#Brexit popup
+popBrexit <- popupTable(UKNUTS3MapWGS, zcol=c("nuts318cd", "nuts318nm", "Leave"))
+
+#The data is then used to set the colour pallets to be used
+#palette 1 for GVA
+pal1 <- colorBin(palette="RdBu",
+                 #where the data comes from
+                 domain=UKNUTS3MapWGS$GVA.in..2017,
+                 #what breaks to use
+                 bins=breaksGVA)
+#palette for unemployment
+pal2 <- colorBin(palette=ReverseRdBu, domain=as.numeric(UKNUTS3MapWGS$U.E.rate...Jul.2018.Jun.2019), bins=breaksUE)
+#palette for IMD
+pal3 <- colorBin(palette=ReverseRdBu, domain=as.numeric(UKNUTS3MapWGS$IMD.2019...Average.score), bins=breaksIMD)
+#palette for female life expectancy
+pal4 <- colorBin(palette="RdBu", domain=as.numeric(UKNUTS3MapWGS$LE.females.2015.2017), bins=breaksLEFM)
+#palette for male life expectancy
+pal5 <- colorBin(palette="RdBu", domain=as.numeric(UKNUTS3MapWGS$LE.males.2015.2017), bins=breaksLEM)
+#palette for GCSE scores
+pal6 <- colorBin(palette = "RdBu", domain=as.numeric(UKNUTS3MapWGS$GCSE.2018.A..C..), bins = breaksGCSE)
+#palette for the percentage voting leave
+pal7 <- colorBin(palette = ReverseRdBu, domain=as.numeric(UKNUTS3MapWGS$Leave), bins = breaksLeave)
+
+#these popup tables and palettes can then be called in the leaflet map
+
+#creating the leaflet map
+map <- leaflet(UKNUTS3MapWGS) %>%
+  
+  #creating basemap options
+  addTiles(group = "OSM (default)") %>%
+  #adding polygons
+  addPolygons(
+              #fillcolor comes from the palette defined before and the data is GVA
+              fillColor = ~pal1(GVA.in..2017),
+              #setting the base color
+              color = "white",
+              weight = 2,
+              opacity = 1,
+              dashArray = "3",
+              #setting the popup table defined before
+              popup = popGVA,
+              #setting how opaque the fills are
+              fillOpacity = 0.7,
+              #setting the group to link the legend
+              group = "GVA",
+              #adding a highlight option
+              highlight = highlightOptions(
+                dashArray = "",
+                #setting that it becomes more noticeable
+                fillOpacity = 0.8,
+                weight = 3,
+                #setting the colour of the outline
+                color = "Grey",
+                #bringing the plot to the front
+                bringToFront = TRUE)
+              ) %>%
+  
+  #this is then replicated for the other indicators
+  addPolygons(fillColor = ~pal2(as.numeric(U.E.rate...Jul.2018.Jun.2019)),
+              color = "white",
+              weight = 2,
+              opacity = 1,
+              dashArray = "3",
+              popup = popUE,
+              fillOpacity = 0.7,
+              group = "UE",
+              highlight = highlightOptions(
+                dashArray = "",
+                fillOpacity = 0.8,
+                weight = 3,
+                color = "Grey",
+                bringToFront = TRUE)) %>%
+  
+  addPolygons(fillColor = ~pal3(IMD.2019...Average.score),
+              color = "white",
+              weight = 2,
+              opacity = 1,
+              dashArray = "3",
+              popup = popIMD,
+              fillOpacity = 0.7,
+              group = "IMD",
+              highlight = highlightOptions(
+                dashArray = "",
+                fillOpacity = 0.8,
+                weight = 3,
+                color = "Grey",
+                bringToFront = TRUE)) %>%
+  
+  addPolygons(fillColor = ~pal4(LE.females.2015.2017),
+              color = "white",
+              weight = 2,
+              opacity = 1,
+              dashArray = "3",
+              popup = popFLE,
+              fillOpacity = 0.7,
+              group = "FLE",
+              highlight = highlightOptions(
+                dashArray = "",
+                fillOpacity = 0.8,
+                weight = 3,
+                color = "Grey",
+                bringToFront = TRUE)) %>%
+  
+  addPolygons(fillColor = ~pal5(LE.males.2015.2017),
+              color = "white",
+              weight = 2,
+              opacity = 1,
+              dashArray = "3",
+              popup = popMLE,
+              fillOpacity = 0.7,
+              group = "MLE",
+              highlight = highlightOptions(
+                dashArray = "",
+                fillOpacity = 0.8,
+                weight = 3,
+                color = "Grey",
+                bringToFront = TRUE)) %>%
+  
+  addPolygons(fillColor = ~pal6(GCSE.2018.A..C..),
+              color = "white",
+              weight = 2,
+              opacity = 1,
+              dashArray = "3",
+              popup = popGCSE,
+              fillOpacity = 0.7,
+              group = "GCSE",
+              highlight = highlightOptions(
+                dashArray = "",
+                fillOpacity = 0.8,
+                weight = 3,
+                color = "Grey",
+                bringToFront = TRUE
+              )) %>%
+  
+  addPolygons(fillColor = ~pal7(Leave),
+              color = "white",
+              weight = 2,
+              opacity = 1,
+              dashArray = "3",
+              popup = popBrexit,
+              fillOpacity = 0.7,
+              group = "Brexit",
+              highlight = highlightOptions(
+                dashArray = "",
+                fillOpacity = 0.8,
+                weight = 3,
+                color = "Grey",
+                bringToFront = TRUE)) %>%
+  
+  #adding legends for each polygon
+  addLegend(
+    #setting the pallete to predetermined one
+    pal=pal1,
+    #where to get the values from        
+    values = UKNUTS3MapWGS$GVA.in..2017,
+    #group this with the GVA polygon        
+    group = c("GVA"),
+    #setting the title of the legend        
+    title = "GVA in 2017 as a percentage of the UK average",
+    #setting the position as bottom left      
+    position = "bottomleft",
+    #formatting the label so that it only shows to three significant figures to make it look cleaner     
+    labFormat = labelFormat(digits=1))%>%
+  
+  #this is then replicated for the other indicators
+  addLegend(pal=pal2,
+            values = as.numeric(UKNUTS3MapWGS$U.E.rate...Jul.2018.Jun.2019),
+            group = c("UE"),
+            title = "Unemployment rate",
+            position = "bottomleft",
+            labFormat = labelFormat(digits=1))%>%
+  
+  addLegend(pal=pal3,
+            values = UKNUTS3MapWGS$IMD.2019...Average.score,
+            group = "IMD",
+            title = "Indices of multiple deprivation score",
+            position = "bottomleft",
+            labFormat = labelFormat(digits=1))%>%
+  
+  addLegend(pal=pal4,
+            values = UKNUTS3MapWGS$LE.females.2015.2017,
+            group = "FLE",
+            title = "Female life expectancy(years)",
+            position = "bottomleft",
+            labFormat = labelFormat(digits=1))%>%
+  
+  addLegend(pal=pal5,
+            values = UKNUTS3MapWGS$LE.males.2015.2017,
+            group = "MLE",
+            title = "Male life expectancy(years)",
+            position = "bottomleft",
+            labFormat = labelFormat(digits=1))%>%
+  
+  addLegend(pal=pal6,
+            values = UKNUTS3MapWGS$GCSE.2018.A..C..,
+            group = "GCSE",
+            title = "Percentage of 5 A*-C grades at GCSE",
+            position = "bottomleft",
+            labFormat = labelFormat(digits=1))%>%
+  
+  addLegend(pal=pal7,
+           values = UKNUTS3MapWGS$Leave,
+           group = "Brexit",
+           title = "Percentage voting leave in 2016 EU referendum",
+           position = "bottomleft",
+           labFormat = labelFormat(digits=1))%>%
+  
+  #adding the option to control the layers
+  addLayersControl(
+    #the only base layer specified is the open streetmap layer
+    baseGroups = "OSM (default)",
+    #calling the overlay groups defined befined
+    overlayGroup = c("UE", "GVA", "IMD", "FLE", "MLE", "GCSE", "Brexit"),
+    #the collapsed = FALSE means that the options are always there
+    options = layersControlOptions(collapsed = FALSE))%>%
+  #initially hide every indicator but GVA
+  hideGroup(c("UE", "IMD", "FLE", "MLE", "GCSE", "Brexit"))
+              
+#outputting the map
+map
+
+
+```
+

@@ -1,0 +1,829 @@
+---
+title: "Code_reproducibility"
+author: "Philip Wilkinson"
+date: "07/01/2020"
+output: html_document
+---
+
+
+The first thing to note is that, because the data was from a variety of data sources from the UK government then they were in different geographies as well. While those that were set in 2018 or 2016 LADs were not a problem to convert to NUTS3 geography as the lookups were readily available, the indices of multiple deprivation and unemplyment data were set in 2019 LAD geography which as of yet did not have a readily available lookup. Therefore, to map the unemployment and the indices of multiple derpivation onto the NUTS3 region I had to do a point in polygon analysis to find the centroids of the LAD19 boundaries and see what NUTS3 region they were located within. Once this was done they could then be aggregated up to the NUTS3 geography along with the indicators. Below is the code that was used to find these geographies. 
+
+```{r}
+library(sf)
+library(tmap)
+library(leafpop)
+library(leaflet)
+library(tmaptools)
+library(tidyverse)
+library(plyr)
+library(classInt)
+library(RColorBrewer)
+library(geojsonio)
+library(knitr)
+
+#importing the NUTS3 geojson
+NUTS3 <- geojson_read("https://opendata.arcgis.com/datasets/473aefdcee19418da7e5dbfdeacf7b90_2.geojson", what = "sp")
+
+#switching the geojson to NUTS
+NUTS3_SF <- st_as_sf(NUTS3)
+
+#The 2019 LAD do not have projections so I must attempt to draw LAD19s onto NUTS3 projectsion
+#To do this do a point in polygon analysis
+#get the LAD19 gejson
+LAD19 <- geojson_read("https://opendata.arcgis.com/datasets/cec4f9cf783a47bab9295b2e513dd342_0.geojson", what = "sp")
+#https://opendata.arcgis.com/datasets/2b95585accc4437b97d766f31c5568cb_0.geojson
+
+#shift this to SF
+LAD19_SF <- st_as_sf(LAD19)
+
+#make sure both the NUTS3 map and LAD19 map have the same projection
+LAD19_SF <- st_transform(LAD19_SF, 27700)
+NUTS3_SF <- st_transform(NUTS3_SF, 27700)
+
+#convert the LAD19 boundaries into points
+LAD19_centroids <- st_centroid(LAD19_SF)
+
+#set the CRS for both of these
+st_crs(LAD19_centroids) <- 27700
+st_crs(NUTS3_SF) <- 27700
+
+#join them on the line at which they intersect
+Joined <- st_join(LAD19_centroids, NUTS3_SF, join = st_intersects)
+
+#create a df of the joined sf df so that I can use VLOOKUP in excel to map LAD19s onto 
+df <- Joined[,c("LAD19NM", "LAD19CD", "LAD19NMW", "nuts318cd")]
+
+
+#remove the geometry from the data set
+df_df <- df %>% st_set_geometry(NULL)
+#check that it has been removed
+class(df_df)
+
+#write the dataset to a csv to be able to use VLOOKUP in excel to map LAD19s onto NUTS3 regions
+write.csv(df_df, 'LAD19.csv')
+
+#the mapping of boundaries of one onto another was done outside of R and in excel
+#this was due to the difficulty of doing so in R
+#They were mapped using the Countif and sumif functions to average out if moving up into a higher mapping level
+```
+
+Once this was done and all the measures were harmonised in terms of geography they were then inputted into a single spreadsheet. The harmonisation was done through excel, in which each boundary was aligned with the NUTS3 Geography usling lookups. This spreadsheet was then imported into R using the read.csv function and setting and missing values as na. These were then merged to create the NUTS3Map
+
+```{r}
+#reading in the data that was created as a result
+NUTS3_data <- read.csv("Data/NUTS3(1).csv", na=c("n/a", "na"))
+
+#merging the sf object with the data created to be able to analyse this later
+UKNUTS3Map <- merge(NUTS3_SF,
+                    NUTS3_data,
+                    by.x = "nuts318cd",
+                    by.y = "NUTS.code",
+                    no.dups=TRUE)
+
+```
+
+The next thing to do was to get the breaks for the plots. This was done by finding the means, standard deviations, minimum and maximum for the relevant measures as seen below.
+
+```{r}
+#setting the breaks for the GVA data
+breaksGVA <- c(0,55,70,85,100,115,130,145,1500)
+
+breaksGVA
+
+#finding the mean and standard deviation for the relevant columns to be able to set the breaks
+UEM <- mean(UKNUTS3Map$U.E.rate...Jul.2018.Jun.2019, na.rm=TRUE)
+UESD <- sd(UKNUTS3Map$U.E.rate...Jul.2018.Jun.2019, na.rm=TRUE)
+UEMin <- min(UKNUTS3Map$U.E.rate...Jul.2018.Jun.2019, na.rm=TRUE)
+UEMax <- max(UKNUTS3Map$U.E.rate...Jul.2018.Jun.201, na.rm=TRUE)
+
+#the breaks were then set using the standard deviations and means
+breaksUE <- c(UEMin, UEM-2*UESD, UEM-1.25*UESD, UEM-0.5*UESD, UEM, UEM+0.5*UESD, UEM+1.25*UESD, UEM+2*UESD, UEMax)
+
+breaksUE
+
+#This was then repeated for the other measures e.g. IMD
+IMDM <- mean(UKNUTS3Map$IMD.2019...Average.score, na.rm=TRUE)
+IMDSD <- sd(UKNUTS3Map$IMD.2019...Average.score, na.rm=TRUE)
+IMDMax <- max(UKNUTS3Map$IMD.2019...Average.score, na.rm=TRUE)
+IMDMin <- min(UKNUTS3Map$IMD.2019...Average.score, na.rm=TRUE)
+
+breaksIMD <- c(IMDMin, IMDM-1.5*IMDSD, IMDM-0.75*IMDSD, IMDM, IMDM+0.75*IMDSD, IMDM+1.5*IMDSD, IMDMax)
+
+breaksIMD
+
+#male life expectancy
+LEMM <- mean(UKNUTS3Map$LE.males.2015.2017,na.rm=TRUE)
+LEMSD <- sd(UKNUTS3Map$LE.males.2015.2017, na.rm=TRUE)
+LEMMin <- min(UKNUTS3Map$LE.males.2015.2017, na.rm=TRUE)
+LEMMax <- max(UKNUTS3Map$LE.males.2015.2017, na.rm=TRUE)
+
+breaksLEM <- c(LEMMin, LEMM-1.5*LEMSD, LEMM-0.75*LEMSD, LEMM, LEMM+0.75*LEMSD, LEMM+1.5*LEMSD, LEMMax)
+
+breaksLEM
+
+#female life expectancy
+LEFM <- mean(UKNUTS3Map$LE.females.2015.2017, na.rm = TRUE)
+LEFSD <- sd(UKNUTS3Map$LE.females.2015.2017, na.rm = TRUE)
+LEFMin <- min(UKNUTS3Map$LE.females.2015.2017, na.rm=TRUE)
+LEFMax <- max(UKNUTS3Map$LE.females.2015.2017, na.rm=TRUE)
+
+breaksLEFM <- c(LEFMin, LEFM-1.5*LEFSD, LEFM-0.75*LEFSD, LEFM, LEFM+0.75*LEFSD, LEFM+1.5*LEFSD, LEFMax)
+
+breaksLEFM
+
+#GCSE scores
+GCSEM <- mean(UKNUTS3Map$GCSE.2018.A..C.., na.rm=TRUE)
+GCSESD <- sd(UKNUTS3Map$GCSE.2018.A..C.., na.rm=TRUE)
+GCSEMin <- min(UKNUTS3Map$GCSE.2018.A..C.., na.rm=TRUE)
+GCSEMax <- max(UKNUTS3Map$GCSE.2018.A..C.., na.rm=TRUE)
+
+breaksGCSE <- c(GCSEMin, GCSEM-2*GCSESD, GCSEM-GCSESD, GCSEM, GCSEM+GCSESD, GCSEM+2*GCSESD, GCSEMax)
+
+breaksGCSE
+
+#percentage voting leave
+LeaveM <- mean(UKNUTS3Map$Leave, na.rm=TRUE)
+LeaveSD <- sd(UKNUTS3Map$Leave, na.rm=TRUE)
+LeaveMin <- min(UKNUTS3Map$Leave, na.rm=TRUE)
+LeaveMax <- max(UKNUTS3Map$Leave, na.rm=TRUE)
+
+breaksLeave <- c(LeaveMin, LeaveM-1.5*LeaveSD, LeaveM-0.75*LeaveSD, LeaveM, LeaveM+0.75*LeaveSD, LeaveM+1.5*LeaveSD, LeaveMax)
+
+breaksLeave
+
+#based on these brakes we could then get the colour palettes that would be associated with the relevant plots
+RdBu7 <- get_brewer_pal("RdBu", n=7)
+RdBu5 <- get_brewer_pal("RdBu", n=5)
+RdBu8 <- get_brewer_pal("RdBu", n=8)
+ReverseRdBu <- get_brewer_pal("-RdBu", n =6)
+ReversedRdBU <- get_brewer_pal("-RdBu", n=8)
+```
+
+Based on these breaks we could then draw the following plots. The first to be drawn is that of GVA which was used to inform the third and final boundary measure as seen below.
+
+```{r}
+
+tm1 <- tm_shape(UKNUTS3Map)+
+  #setting the fill as GVA
+  tm_fill("GVA.in..2017",
+          #setting the alpha to 0
+          alpha = 1,
+          #setting the title of the legend
+          title= "GVA (% of UK average)",
+          #setting the breaks
+          breaks=breaksGVA, 
+          #selecting the pallette
+          palette = RdBu8,
+          #setting the legend to show
+          legend.show = TRUE)+
+  #setting borders between the regions
+  tm_borders(
+             #setting the colour as grey 
+             col = "grey",
+             #setting the alpha as 0.8 
+             alpha= 0.8)+
+  #adding a legend
+  tm_legend(#setting the title size
+            title.size = 1.2,
+            show=TRUE, 
+            #setting the position
+            position = c(0.05,0.4))+
+  tm_layout(#setting the title for the overall plot
+            title = "(a)",
+            #setting the size of the title
+            title.size = 2,
+            #setting the title's position
+            title.position = c("left", "top"),
+            #setting a frame around the plot
+            frame=TRUE,
+            #setting the heigh of the legend
+            legend.height = 4,
+            #setting its width
+            legend.width= 4,
+            #setting the text size for the legend as 1
+            legend.text.size = 1)+
+  #adding a compass to the plot
+  tm_compass(#choosing the type of the compass
+             type = "rose",
+             #positioning the compassin the top right color
+             position = c(0.75, 0.8,
+             #setting the color
+             color.light="grey90"),
+             #the usual size is 6 but we want it smaller
+             size = 4)+
+  #adding a scale bar to the plot
+  tm_scale_bar(#setting the breaks as 0,50 and 100km
+               breaks = c(0,50,100),
+               text.size=1)
+
+tm1
+```
+
+We are then concerned with drawing the different boundary lines. Following inspection of Rowthron's (2010) paper and Dorling's (2010) paper two boundaries can be drawn. The first uses the boundaries of the NUTS1 regions in the UK, the second uses Parliamentary constituencies. While the first can be mapped exactly, the second must be mapped approximately based on how the outline fits with the NUTS3 boundaries. The third plot is then deduced from a visual inspection of the previous plot, along with ideas from the national media suggesting that the South-East is seperating from the rest of the UK.
+
+```{r}
+tm2 <- tm_shape(UKNUTS3Map)+
+  #setting a fill along the dividing line, 1 = North, 0 = South
+  tm_fill("Dorling")+
+  #showing that we don't want a legend
+  tm_legend(show=FALSE)+
+  #showing that we don't want a frame
+  tm_layout(frame=FALSE)+
+  #setting the credit as a)
+  tm_credits("(b)",
+             #setting the position and size of this credit
+             position = c(0.3,0.80),
+             size=1.5)
+
+#Repeating this for Rowthorn and South-East definitions
+tm3 <- tm_shape(UKNUTS3Map)+
+  tm_fill("Rowthorn")+
+  tm_legend(show=FALSE)+
+  tm_layout(frame=FALSE)+
+  tm_credits("(c)",
+             position = c(0.3,0.80),
+             size=1.5)
+
+tm4 <- tm_shape(UKNUTS3Map)+
+  tm_fill("SE")+
+  tm_legend(show=FALSE)+
+  tm_layout(frame=FALSE)+
+  tm_credits("(d)", 
+             position = c(0.3,0.80), 
+             size=1.5)
+
+#arranging these plots in a single column so they can be easily compared
+tmap_arrange(tm2,tm3,tm4, ncol=1)
+```
+
+This can then be followed up by plots for the other six indicators
+
+```{r}
+#creating a plot to show unemployment
+tm5 <- tm_shape(UKNUTS3Map)+
+  #creating a fill
+  tm_fill(#setting where to get the data from
+          "U.E.rate...Jul.2018.Jun.2019",
+          #setting the alpha to 1
+          alpha = 1,
+          #setting the title of the legend
+          title= "Unemployment (%)",
+          #setting the breaks as what has been created before
+          breaks= breaksUE, 
+          #setting the pallete as chosen before
+          palette = ReverseRdBu,
+          legend.width = 4,
+          #showing the legend
+          legend.show = TRUE)+
+  #creating borders 
+  tm_borders(#setting the colour as grey
+             col = "grey",
+             #setting the alpha as 0.5 so it isn't as strong
+             alpha= 0.5)+
+  #adding the legend
+  tm_legend(#setting the title size to 1
+            title.size = 1,
+            show=TRUE, 
+            #setting the position of the title
+            position = c(0.05,0.3)
+  )+
+  tm_layout(#setting the overall title
+            title = "Unemployment Rate 2018-2019",
+            #selecting the title position as the left and top
+            title.position = c("left", "top"),
+            #selecting that we only want 1 digit after the decimal place
+            legend.format=list(fun = function(x) paste0(formatC(x, digits = 1, format = "f"))),
+            #selectring that we want a frame for the overall plot
+            frame=TRUE,
+            legend.title.size = 1,
+            legend.show = TRUE,
+            legend.position = c(0.05, 0.35),
+            legend.width=3)+
+  #adding a compass
+  tm_compass(#setting the type as a rose
+             type = "rose",
+             #setting the position in the top right corner
+             position = c(0.75, 0.8,
+                          color.light="grey90"),
+             #setting the size as 3
+             size = 3)+
+  #adding a scale bar
+  tm_scale_bar(#setting the breaks as 0,50 and 100
+               breaks = c(0,50,100),
+               #setting the text size as 1
+               text.size=1)
+
+tm5
+
+tm10 <- tm_shape(UKNUTS3Map)+
+  tm_fill("IMD.2019...Average.score",
+          alpha = 1,
+          title= "IMD score",
+          breaks= breaksIMD, 
+          palette = ReverseRdBu,
+          legend.width = 4,
+          legend.show = TRUE)+
+  tm_borders(col = "grey",
+             alpha= 0.5)+
+  tm_legend(title.size = 1,
+            show=TRUE, 
+            position = c(0.05,0.35))+
+  tm_layout(title = "IMD 2019 average score",
+            title.position = c("left", "top"),
+            legend.format=list(fun = function(x) paste0(formatC(x, digits = 1, format = "f"))),
+            frame=TRUE)+
+  tm_compass(type = "rose",
+             position = c(0.75, 0.8,
+                          color.light="grey90"),
+             size = 3)+
+  tm_scale_bar(breaks = c(0,50,100),
+               text.size=1)
+
+breaksIMD
+tm10
+
+tm6 <- tm_shape(UKNUTS3Map)+
+  tm_fill("LE.females.2015.2017",
+          alpha = 1,
+          title= "Life expactancy (years)",
+          breaks= breaksLEFM, 
+          palette = RdBu7,
+          legend.width = 4,
+          legend.show = TRUE)+
+  tm_borders(col = "grey",
+             alpha= 0.5)+
+  tm_legend(title.size = 1,
+            show=TRUE, 
+            position = c(0.05,0.4))+
+  tm_layout(title = "Female life expectancy 2015-2017 ",
+            title.position = c("left", "top"),
+            legend.format=list(fun = function(x) paste0(formatC(x, digits = 1, format = "f"))),
+            frame=TRUE)+
+  tm_compass(type = "rose",
+             position = c(0.75, 0.8,
+                          color.light="grey90"),
+             size = 3)+
+  tm_scale_bar(breaks = c(0,50,100),
+               text.size=1)
+
+tm6
+
+tm7 <- tm_shape(UKNUTS3Map)+
+  tm_fill("LE.males.2015.2017",
+          alpha = 1,
+          title= "Life expectancy (years)",
+          breaks= breaksLEM, 
+          palette = RdBu7,
+          legend.width = 4,
+          legend.show = TRUE)+
+  tm_borders(col = "grey",
+             alpha= 0.5)+
+  tm_borders(col = "grey",
+             alpha= 0.5)+
+  tm_legend(title.size = 1,
+            show=TRUE, 
+            position = c(0.05,0.35))+
+  tm_layout(title = "Male Life expactancy 2015-2017",
+            title.position = c("left", "top"),
+            legend.format=list(fun = function(x) paste0(formatC(x, digits = 1, format = "f"))),
+            frame=TRUE)+
+  tm_compass(type = "rose",
+             position = c(0.75, 0.8,
+                          color.light="grey90"),
+             size = 3)+
+  tm_scale_bar(breaks = c(0,50,100),
+               text.size=1)
+
+tm7
+
+#hist(NUTS3_data$GCSE.2018.A..C.., main="Histogram of unemployment", xlab="Unemployment", xlim=c(45,78), breaks=30)
+
+
+tm8 <- tm_shape(UKNUTS3Map)+
+  tm_fill("GCSE.2011.A..C..",
+          alpha = 1,
+          title= "A*-C grades (%)",
+          breaks= breaksGCSE, 
+          palette = RdBu7,
+          legend.width = 4,
+          legend.show = TRUE)+
+  tm_borders(col = "grey",
+             alpha= 0.5)+
+  tm_legend(title.size = 1,
+            show=TRUE, 
+            position = c(0.05,0.4))+
+  tm_layout(title = "Percentage of A*-C GCSE grades 2018",
+            title.position = c("left", "top"),
+            legend.format=list(fun = function(x) paste0(formatC(x, digits = 1, format = "f"))),
+            frame=TRUE)+
+  tm_compass(type = "rose",
+             position = c(0.75, 0.8,
+                          color.light="grey90"),
+             size = 3)+
+  tm_scale_bar(breaks = c(0,50,100),
+               text.size=1)
+
+tm8
+
+#hist(NUTS3_data$Leave, main="Histogram of unemployment", xlab="Unemployment", xlim=c(20,80), breaks=100)
+
+tm9 <- tm_shape(UKNUTS3Map)+
+  tm_fill("Leave",
+          alpha = 1,
+          title= "Leave (%)",
+          breaks= breaksLeave, 
+          palette = ReverseRdBu,
+          legend.width = 4,
+          legend.digits = 3,
+          legend.show = TRUE)+
+  tm_borders(col = "grey",
+             alpha= 0.5)+
+  tm_legend(title.size = 1,
+            show=TRUE, 
+            position = c(0.05,0.4))+
+  tm_layout(title = "Percentage voting Leave in 2016",
+            title.position = c("left", "top"),
+            legend.format=list(fun = function(x) paste0(formatC(x, digits = 1, format = "f"))),
+            frame=TRUE)+
+  tm_compass(type = "rose",
+             position = c(0.75, 0.8,
+                          color.light="grey90"),
+             size = 3)+
+  tm_scale_bar(breaks = c(0,50,100),
+               text.size=1)
+
+tm9
+
+#these six plots are then arranged into a single plot such that there are three columns with 2 layers
+t = tmap_arrange(tm5, tm6, tm7,tm8,tm10,tm9, ncol=3)
+t
+#this ouput is then exported to produce a png 
+```
+
+These static plots are included in the PDF output however these can also be mapped in an interactive plot that includes all seven indicators.
+
+```{r}
+library(leafpop)
+library(leaflet)
+
+#given that leaflet uses world map data then the map must be ttrasnsformed to WGS84 projection
+UKNUTS3MapWGS <- st_transform(UKNUTS3Map, 4326)
+
+#the data can be used to create popup tables for each of the indicators
+popGVA <- popupTable(#the data comes from the map
+                     UKNUTS3MapWGS,
+                     #the columns to be included are the NUTS3 code, the NUTS3 name and the valye
+                     zcol=c("nuts318cd", "nuts318nm", "GVA.in..2017"))
+#unemployment popup
+popUE <- popupTable(UKNUTS3MapWGS, zcol=c("nuts318cd", "nuts318nm", "U.E.rate...Jul.2018.Jun.2019"))
+#male life expectancy popup
+popMLE <- popupTable(UKNUTS3MapWGS, zcol=c("nuts318cd", "nuts318nm", "LE.males.2015.2017"))
+#female life expectancy popup
+popFLE <- popupTable(UKNUTS3MapWGS, zcol=c("nuts318cd", "nuts318nm", "LE.females.2015.2017"))
+#GCSE popup
+popGCSE <- popupTable(UKNUTS3MapWGS, zcol=c("nuts318cd", "nuts318nm", "GCSE.2018.A..C.."))
+#IMD popup
+popIMD <- popupTable(UKNUTS3MapWGS, zcol=c("nuts318cd", "nuts318nm", "IMD.2019...Average.score"))
+#Brexit popup
+popBrexit <- popupTable(UKNUTS3MapWGS, zcol=c("nuts318cd", "nuts318nm", "Leave"))
+
+#The data is then used to set the colour pallets to be used
+#palette 1 for GVA
+pal1 <- colorBin(palette="RdBu",
+                 #where the data comes from
+                 domain=UKNUTS3MapWGS$GVA.in..2017,
+                 #what breaks to use
+                 bins=breaksGVA)
+#palette for unemployment
+pal2 <- colorBin(palette=ReverseRdBu, domain=as.numeric(UKNUTS3MapWGS$U.E.rate...Jul.2018.Jun.2019), bins=breaksUE)
+#palette for IMD
+pal3 <- colorBin(palette=ReverseRdBu, domain=as.numeric(UKNUTS3MapWGS$IMD.2019...Average.score), bins=breaksIMD)
+#palette for female life expectancy
+pal4 <- colorBin(palette="RdBu", domain=as.numeric(UKNUTS3MapWGS$LE.females.2015.2017), bins=breaksLEFM)
+#palette for male life expectancy
+pal5 <- colorBin(palette="RdBu", domain=as.numeric(UKNUTS3MapWGS$LE.males.2015.2017), bins=breaksLEM)
+#palette for GCSE scores
+pal6 <- colorBin(palette = "RdBu", domain=as.numeric(UKNUTS3MapWGS$GCSE.2018.A..C..), bins = breaksGCSE)
+#palette for the percentage voting leave
+pal7 <- colorBin(palette = ReverseRdBu, domain=as.numeric(UKNUTS3MapWGS$Leave), bins = breaksLeave)
+
+#these popup tables and palettes can then be called in the leaflet map
+
+#creating the leaflet map
+map <- leaflet(UKNUTS3MapWGS) %>%
+  
+  #creating basemap options
+  addTiles(group = "OSM (default)") %>%
+  #adding polygons
+  addPolygons(
+              #fillcolor comes from the palette defined before and the data is GVA
+              fillColor = ~pal1(GVA.in..2017),
+              #setting the base color
+              color = "white",
+              weight = 2,
+              opacity = 1,
+              dashArray = "3",
+              #setting the popup table defined before
+              popup = popGVA,
+              #setting how opaque the fills are
+              fillOpacity = 0.7,
+              #setting the group to link the legend
+              group = "GVA",
+              #adding a highlight option
+              highlight = highlightOptions(
+                dashArray = "",
+                #setting that it becomes more noticeable
+                fillOpacity = 0.8,
+                weight = 3,
+                #setting the colour of the outline
+                color = "Grey",
+                #bringing the plot to the front
+                bringToFront = TRUE)
+              ) %>%
+  
+  #this is then replicated for the other indicators
+  addPolygons(fillColor = ~pal2(as.numeric(U.E.rate...Jul.2018.Jun.2019)),
+              color = "white",
+              weight = 2,
+              opacity = 1,
+              dashArray = "3",
+              popup = popUE,
+              fillOpacity = 0.7,
+              group = "UE",
+              highlight = highlightOptions(
+                dashArray = "",
+                fillOpacity = 0.8,
+                weight = 3,
+                color = "Grey",
+                bringToFront = TRUE)) %>%
+  
+  addPolygons(fillColor = ~pal3(IMD.2019...Average.score),
+              color = "white",
+              weight = 2,
+              opacity = 1,
+              dashArray = "3",
+              popup = popIMD,
+              fillOpacity = 0.7,
+              group = "IMD",
+              highlight = highlightOptions(
+                dashArray = "",
+                fillOpacity = 0.8,
+                weight = 3,
+                color = "Grey",
+                bringToFront = TRUE)) %>%
+  
+  addPolygons(fillColor = ~pal4(LE.females.2015.2017),
+              color = "white",
+              weight = 2,
+              opacity = 1,
+              dashArray = "3",
+              popup = popFLE,
+              fillOpacity = 0.7,
+              group = "FLE",
+              highlight = highlightOptions(
+                dashArray = "",
+                fillOpacity = 0.8,
+                weight = 3,
+                color = "Grey",
+                bringToFront = TRUE)) %>%
+  
+  addPolygons(fillColor = ~pal5(LE.males.2015.2017),
+              color = "white",
+              weight = 2,
+              opacity = 1,
+              dashArray = "3",
+              popup = popMLE,
+              fillOpacity = 0.7,
+              group = "MLE",
+              highlight = highlightOptions(
+                dashArray = "",
+                fillOpacity = 0.8,
+                weight = 3,
+                color = "Grey",
+                bringToFront = TRUE)) %>%
+  
+  addPolygons(fillColor = ~pal6(GCSE.2018.A..C..),
+              color = "white",
+              weight = 2,
+              opacity = 1,
+              dashArray = "3",
+              popup = popGCSE,
+              fillOpacity = 0.7,
+              group = "GCSE",
+              highlight = highlightOptions(
+                dashArray = "",
+                fillOpacity = 0.8,
+                weight = 3,
+                color = "Grey",
+                bringToFront = TRUE
+              )) %>%
+  
+  addPolygons(fillColor = ~pal7(Leave),
+              color = "white",
+              weight = 2,
+              opacity = 1,
+              dashArray = "3",
+              popup = popBrexit,
+              fillOpacity = 0.7,
+              group = "Brexit",
+              highlight = highlightOptions(
+                dashArray = "",
+                fillOpacity = 0.8,
+                weight = 3,
+                color = "Grey",
+                bringToFront = TRUE)) %>%
+  
+  #adding legends for each polygon
+  addLegend(
+    #setting the pallete to predetermined one
+    pal=pal1,
+    #where to get the values from        
+    values = UKNUTS3MapWGS$GVA.in..2017,
+    #group this with the GVA polygon        
+    group = c("GVA"),
+    #setting the title of the legend        
+    title = "GVA in 2017 as a percentage of the UK average",
+    #setting the position as bottom left      
+    position = "bottomleft",
+    #formatting the label so that it only shows to three significant figures to make it look cleaner     
+    labFormat = labelFormat(digits=1))%>%
+  
+  #this is then replicated for the other indicators
+  addLegend(pal=pal2,
+            values = as.numeric(UKNUTS3MapWGS$U.E.rate...Jul.2018.Jun.2019),
+            group = c("UE"),
+            title = "Unemployment rate",
+            position = "bottomleft",
+            labFormat = labelFormat(digits=1))%>%
+  
+  addLegend(pal=pal3,
+            values = UKNUTS3MapWGS$IMD.2019...Average.score,
+            group = "IMD",
+            title = "Indices of multiple deprivation score",
+            position = "bottomleft",
+            labFormat = labelFormat(digits=1))%>%
+  
+  addLegend(pal=pal4,
+            values = UKNUTS3MapWGS$LE.females.2015.2017,
+            group = "FLE",
+            title = "Female life expectancy(years)",
+            position = "bottomleft",
+            labFormat = labelFormat(digits=1))%>%
+  
+  addLegend(pal=pal5,
+            values = UKNUTS3MapWGS$LE.males.2015.2017,
+            group = "MLE",
+            title = "Male life expectancy(years)",
+            position = "bottomleft",
+            labFormat = labelFormat(digits=1))%>%
+  
+  addLegend(pal=pal6,
+            values = UKNUTS3MapWGS$GCSE.2018.A..C..,
+            group = "GCSE",
+            title = "Percentage of 5 A*-C grades at GCSE",
+            position = "bottomleft",
+            labFormat = labelFormat(digits=1))%>%
+  
+  addLegend(pal=pal7,
+           values = UKNUTS3MapWGS$Leave,
+           group = "Brexit",
+           title = "Percentage voting leave in 2016 EU referendum",
+           position = "bottomleft",
+           labFormat = labelFormat(digits=1))%>%
+  
+  #adding the option to control the layers
+  addLayersControl(
+    #the only base layer specified is the open streetmap layer
+    baseGroups = "OSM (default)",
+    #calling the overlay groups defined befined
+    overlayGroup = c("UE", "GVA", "IMD", "FLE", "MLE", "GCSE", "Brexit"),
+    #the collapsed = FALSE means that the options are always there
+    options = layersControlOptions(collapsed = FALSE))%>%
+  #initially hide every indicator but GVA
+  hideGroup(c("UE", "IMD", "FLE", "MLE", "GCSE", "Brexit"))
+              
+#outputting the map
+map
+```
+
+
+These plots are only a visual representation of the North-South divide compared to the three divides envisioned. Therefore, to better understand the divide we can use regression models. This is done using a dummy variable of 1 as being North and 0 being South according to the difference conceptions of the North-South divide. While many other factors are likely to influence these regression outputs, by using only a dummy variable we are able to explore to what extent can being in either the North or the South be associated with differences in indicators that can be broadly encompassed within measures related to quality of life. This is also able to comment on how much a simple dummy variable of North or South can capture the variance in these indicators through looking at the the R-squared value.
+
+```{r}
+
+library(broom)
+
+#setting up a function to run a linear regression
+regressionmodel <- function(data1,data2){
+  #setting the regression function
+  modelx <- lm(data1 ~ data2)
+  #assigning the summary to a variable
+  modelx_summary <- summary(modelx)
+  modelx_res <- tidy(modelx)
+  #returning the summary of the regression
+  return(modelx_summary)
+}
+
+#this regression model is then used on the different indicators according the divides of Dorling, Rowthorn and the South-East
+
+#the first concern is the GVA outliers
+hist(NUTS3_data$GVA.in..2017,
+     main = "Histogram of GVA in 2017",
+     xlab = "GVA",
+     ylab = "frequency",
+     col = "green",
+     breaks = 100)
+#this suggests there are outliers of four areas above 200% of GVA
+#so these can be removed when running the regression
+
+GVA_no_outliers <- subset.data.frame(NUTS3_data, NUTS3_data$GVA.in..2017<200)
+
+GVA_outliers <- subset.data.frame(NUTS3_data, NUTS3_data$GVA.in..2017>200)
+
+library(broom)
+
+#GVA without extremes
+GVA_Dorling <- regressionmodel(GVA_no_outliers$GVA.in..2017, GVA_no_outliers$Dorling)
+GVA_Dorling
+
+GVA_Rowthorn <- regressionmodel(GVA_no_outliers$GVA.in..2017, GVA_no_outliers$Rowthorn)
+GVA_Rowthorn
+
+GVA_SE <- regressionmodel(GVA_no_outliers$GVA.in..2017, GVA_no_outliers$SE)
+GVA_SE
+
+#GVA with extremes
+GVA_Dorling_E <- regressionmodel(NUTS3_data$GVA.in..2017, NUTS3_data$Dorling)
+GVA_Dorling_E
+
+GVA_Rowthorn_E <- regressionmodel(NUTS3_data$GVA.in..2017, NUTS3_data$Rowthorn)
+GVA_Rowthorn_E
+
+GVA_SE_E <- regressionmodel(NUTS3_data$GVA.in..2017, NUTS3_data$SE)
+GVA_SE_E
+
+#unemployment
+UE_Dorling <- regressionmodel(NUTS3_data$U.E.rate...Jul.2018.Jun.2019, NUTS3_data$Dorling)
+UE_Dorling
+
+UE_Rowthorn <- regressionmodel(NUTS3_data$U.E.rate...Jul.2018.Jun.2019, NUTS3_data$Rowthorn)
+UE_Rowthorn
+
+UE_SE <- regressionmodel(NUTS3_data$U.E.rate...Jul.2018.Jun.2019, NUTS3_data$SE)
+UE_SE
+
+#Male life expectancy
+MaleLE_Dorling <- regressionmodel(NUTS3_data$LE.males.2015.2017, NUTS3_data$Dorling)
+MaleLE_Dorling
+
+MaleLE_Rowthorn <- regressionmodel(NUTS3_data$LE.males.2015.2017, NUTS3_data$Rowthorn)
+MaleLE_Rowthorn
+
+MaleLE_SE <- regressionmodel(NUTS3_data$LE.males.2015.2017, NUTS3_data$SE)
+MaleLE_SE
+
+#Female life expectancy
+femaleLE_Dorling <- regressionmodel(NUTS3_data$LE.females.2015.2017, NUTS3_data$Dorling)
+femaleLE_Dorling
+
+femaleLE_Rowthorn <- regressionmodel(NUTS3_data$LE.females.2015.2017, NUTS3_data$Rowthorn)
+femaleLE_Rowthorn
+
+femaleLE_SE <- regressionmodel(NUTS3_data$LE.females.2015.2017, NUTS3_data$SE)
+femaleLE_SE
+
+#GCSE
+GCSE_Dorling <- regressionmodel(NUTS3_data$GCSE.2018.A..C.., NUTS3_data$Dorling)
+GCSE_Dorling
+
+GCSE_Rowthorn <- regressionmodel(NUTS3_data$GCSE.2018.A..C.., NUTS3_data$Rowthorn)
+GCSE_Rowthorn
+
+GCSE_SE <- regressionmodel(NUTS3_data$GCSE.2018.A..C.., NUTS3_data$SE)
+GCSE_SE
+
+#IMD 
+IMD_Dorling <- regressionmodel(NUTS3_data$IMD.2019...Average.score, NUTS3_data$Dorling)
+IMD_Dorling
+
+IMD_Rowthorn <- regressionmodel(NUTS3_data$IMD.2019...Average.score, NUTS3_data$Rowthorn)
+IMD_Rowthorn
+
+IMD_SE <- regressionmodel(NUTS3_data$IMD.2019...Average.score, NUTS3_data$SE)
+IMD_SE
+
+#Brexit leave
+Brexit_Dorling <- regressionmodel(NUTS3_data$Leave, NUTS3_data$Dorling)
+Brexit_Dorling
+
+Brexit_Rowthorn <- regressionmodel(NUTS3_data$Leave, NUTS3_data$Rowthorn)
+Brexit_Rowthorn
+
+Brexit_SE <- regressionmodel(NUTS3_data$Leave, NUTS3_data$SE)
+Brexit_SE
+```
+
+The results in these regressions were then inputted into figure 4 in the PDf.
+
+
+
